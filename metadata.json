@@ -1,0 +1,7 @@
+{
+  "name": "ScanFlow OCR Pro",
+  "description": "An enterprise-grade OCR automation tool that allows users to map specific areas of scanned documents to data fields and extract information directly into structured formats, ready for Google Sheets.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
