@@ -16,11 +16,13 @@ import {
   X,
   FileJson,
   FileCode,
-  ClipboardList
+  ClipboardList,
+  Sparkles,
+  Wand2
 } from 'lucide-react';
 import { Region, ScannedFile } from './types';
 import DocumentCanvas from './components/DocumentCanvas';
-import { extractDataFromImage } from './services/geminiService';
+import { extractDataFromImage, detectRegionsFromImage } from './services/geminiService';
 
 const App: React.FC = () => {
   const [files, setFiles] = useState<ScannedFile[]>([]);
@@ -28,6 +30,7 @@ const App: React.FC = () => {
   const [regions, setRegions] = useState<Region[]>([]);
   const [activeRegionId, setActiveRegionId] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isDetecting, setIsDetecting] = useState(false);
   const [view, setView] = useState<'editor' | 'results'>('editor');
 
   const currentFile = files[currentIndex];
@@ -62,6 +65,37 @@ const App: React.FC = () => {
     setRegions(prev => prev.map(r => r.id === id ? { ...r, name } : r));
   };
 
+  const fileToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const handleAutoDetect = async () => {
+    if (!currentFile) return;
+    
+    setIsDetecting(true);
+    try {
+      const base64 = await fileToBase64(currentFile.file);
+      const detectedRegions = await detectRegionsFromImage(base64);
+      
+      if (detectedRegions && detectedRegions.length > 0) {
+        setRegions(detectedRegions);
+        setActiveRegionId(detectedRegions[0].id);
+      } else {
+        alert("Gemini couldn't identify any clear fields in this document. Try mapping them manually.");
+      }
+    } catch (error) {
+      console.error("Detection failed:", error);
+      alert("Error detecting fields. Please try again.");
+    } finally {
+      setIsDetecting(false);
+    }
+  };
+
   const processAllFiles = async () => {
     if (regions.length === 0) {
       alert("Please define at least one region to extract.");
@@ -77,14 +111,7 @@ const App: React.FC = () => {
       setFiles(prev => prev.map((f, idx) => idx === i ? { ...f, status: 'processing' } : f));
 
       try {
-        const file = files[i].file;
-        const base64 = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result as string);
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        });
-
+        const base64 = await fileToBase64(files[i].file);
         const result = await extractDataFromImage(base64, regions);
         setFiles(prev => prev.map((f, idx) => 
           idx === i ? { ...f, status: 'completed', extractedData: result } : f
@@ -244,11 +271,25 @@ const App: React.FC = () => {
               </div>
             </div>
 
-            <div className="flex-1 bg-slate-100/50 p-8 overflow-y-auto flex flex-col items-center">
+            <div className="flex-1 bg-slate-100/50 p-8 overflow-y-auto flex flex-col items-center relative">
               {currentFile ? (
                 <div className="w-full max-w-3xl">
                   <div className="mb-4 flex items-center justify-between">
-                    <h2 className="text-sm font-bold text-slate-500 uppercase tracking-widest">Mapping Area</h2>
+                    <div className="flex items-center space-x-3">
+                      <h2 className="text-sm font-bold text-slate-500 uppercase tracking-widest">Mapping Area</h2>
+                      <button 
+                        onClick={handleAutoDetect}
+                        disabled={isDetecting}
+                        className="flex items-center space-x-2 px-3 py-1.5 bg-indigo-100 text-indigo-700 rounded-lg text-xs font-bold hover:bg-indigo-200 transition-colors disabled:opacity-50"
+                      >
+                        {isDetecting ? (
+                          <Loader2 size={14} className="animate-spin" />
+                        ) : (
+                          <Sparkles size={14} className="animate-pulse" />
+                        )}
+                        <span>{isDetecting ? 'Analyzing Document...' : 'Magic Auto-Detect'}</span>
+                      </button>
+                    </div>
                     <p className="text-xs font-semibold text-slate-400">Targeting: {currentFile.file.name}</p>
                   </div>
                   <DocumentCanvas 
@@ -258,6 +299,20 @@ const App: React.FC = () => {
                     activeRegionId={activeRegionId}
                     onSelectRegion={setActiveRegionId}
                   />
+                  {isDetecting && (
+                    <div className="absolute inset-0 bg-white/40 backdrop-blur-[2px] z-10 flex items-center justify-center rounded-2xl">
+                       <div className="bg-white p-6 rounded-2xl shadow-xl flex flex-col items-center space-y-4 border border-slate-100">
+                         <div className="relative">
+                           <Wand2 className="w-10 h-10 text-indigo-600 animate-bounce" />
+                           <Sparkles className="w-5 h-5 text-amber-400 absolute -top-2 -right-2 animate-pulse" />
+                         </div>
+                         <div className="text-center">
+                           <h4 className="font-bold text-slate-800">Gemini is Thinking...</h4>
+                           <p className="text-xs text-slate-500">Mapping the best areas for extraction</p>
+                         </div>
+                       </div>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="flex-1 flex flex-col items-center justify-center text-slate-400">
@@ -289,7 +344,7 @@ const App: React.FC = () => {
                   >
                     <div className="flex items-center justify-between mb-2">
                       <span className="text-[9px] font-bold text-indigo-600 bg-indigo-100 px-2 py-0.5 rounded-full uppercase tracking-widest">Field Definition</span>
-                      <button onClick={() => deleteRegion(region.id)} className="text-slate-300 hover:text-red-500"><Trash2 size={14} /></button>
+                      <button onClick={() => deleteRegion(region.id)} className="text-slate-300 hover:text-red-500 transition-colors"><Trash2 size={14} /></button>
                     </div>
                     <input 
                       type="text" 
@@ -305,7 +360,7 @@ const App: React.FC = () => {
                     <div className="w-12 h-12 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-3">
                       <Plus className="text-slate-300" size={20} />
                     </div>
-                    <p className="text-xs text-slate-400 font-medium px-6 leading-relaxed">Draw a rectangle on the document to define an extraction field.</p>
+                    <p className="text-xs text-slate-400 font-medium px-6 leading-relaxed">Draw a rectangle on the document or use Magic Auto-Detect.</p>
                   </div>
                 )}
               </div>
@@ -323,7 +378,7 @@ const App: React.FC = () => {
           </>
         ) : (
           <div className="flex-1 flex flex-col bg-white overflow-hidden">
-            <div className="p-8">
+            <div className="p-8 flex-1 flex flex-col">
               <div className="flex items-center justify-between mb-8">
                 <div>
                   <h2 className="text-2xl font-bold text-slate-800">Export Hub</h2>
@@ -332,21 +387,21 @@ const App: React.FC = () => {
                 <div className="flex space-x-2">
                   <button 
                     onClick={exportAsCSV}
-                    className="flex items-center space-x-2 px-4 py-2 bg-slate-900 text-white rounded-xl font-bold text-xs hover:bg-slate-800 transition-all"
+                    className="flex items-center space-x-2 px-4 py-2 bg-slate-900 text-white rounded-xl font-bold text-xs hover:bg-slate-800 transition-all shadow-sm"
                   >
                     <Download size={14} />
                     <span>CSV</span>
                   </button>
                   <button 
                     onClick={exportAsJSON}
-                    className="flex items-center space-x-2 px-4 py-2 bg-indigo-600 text-white rounded-xl font-bold text-xs hover:bg-indigo-700 transition-all"
+                    className="flex items-center space-x-2 px-4 py-2 bg-indigo-600 text-white rounded-xl font-bold text-xs hover:bg-indigo-700 transition-all shadow-sm"
                   >
                     <FileJson size={14} />
                     <span>JSON</span>
                   </button>
                   <button 
                     onClick={exportAsMarkdown}
-                    className="flex items-center space-x-2 px-4 py-2 bg-emerald-600 text-white rounded-xl font-bold text-xs hover:bg-emerald-700 transition-all"
+                    className="flex items-center space-x-2 px-4 py-2 bg-emerald-600 text-white rounded-xl font-bold text-xs hover:bg-emerald-700 transition-all shadow-sm"
                   >
                     <FileCode size={14} />
                     <span>Markdown</span>
@@ -354,30 +409,30 @@ const App: React.FC = () => {
                 </div>
               </div>
 
-              <div className="overflow-x-auto rounded-2xl border border-slate-200">
+              <div className="flex-1 overflow-auto rounded-2xl border border-slate-200">
                 <table className="w-full text-left border-collapse">
-                  <thead>
+                  <thead className="sticky top-0 z-10">
                     <tr className="bg-slate-50 border-b border-slate-200">
-                      <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Source Document</th>
+                      <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest bg-slate-50">Source Document</th>
                       {regions.map(r => (
-                        <th key={r.id} className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">{r.name}</th>
+                        <th key={r.id} className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest bg-slate-50">{r.name}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {files.filter(f => f.status === 'completed').map(file => (
+                    {files.filter(f => f.status === 'completed' || f.status === 'processing').map(file => (
                       <tr key={file.id} className="hover:bg-slate-50/50 transition-colors">
                         <td className="px-6 py-4">
                           <div className="flex items-center space-x-3">
-                            <div className="w-8 h-8 rounded bg-indigo-50 flex items-center justify-center text-indigo-600">
-                              <CheckCircle2 size={16} />
+                            <div className={`w-8 h-8 rounded flex items-center justify-center ${file.status === 'completed' ? 'bg-emerald-50 text-emerald-600' : 'bg-indigo-50 text-indigo-600'}`}>
+                              {file.status === 'completed' ? <CheckCircle2 size={16} /> : <Loader2 size={16} className="animate-spin" />}
                             </div>
                             <span className="text-xs font-bold text-slate-700 truncate max-w-[150px]">{file.file.name}</span>
                           </div>
                         </td>
                         {regions.map(r => (
                           <td key={r.id} className="px-6 py-4 text-xs text-slate-600 font-medium">
-                            {file.extractedData?.[r.name] || '-'}
+                            {file.status === 'completed' ? (file.extractedData?.[r.name] || '-') : <span className="text-slate-300 italic">Processing...</span>}
                           </td>
                         ))}
                       </tr>
