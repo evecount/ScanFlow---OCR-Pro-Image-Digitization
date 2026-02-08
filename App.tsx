@@ -50,7 +50,6 @@ const App: React.FC = () => {
   const currentFile = files[currentIndex];
 
   const removeFile = (id: string) => {
-    // Only allow deletion if not currently being processed by the batch runner
     const fileToRemove = files.find(f => f.id === id);
     if (fileToRemove?.status === 'processing') return;
 
@@ -121,6 +120,7 @@ const App: React.FC = () => {
           idx === i ? { ...f, status: 'completed', extractedData: result, syncStatus: 'syncing' } : f
         ));
 
+        // Persistence in Firestore
         const syncSuccess = await saveExtractionToFirestore(batchId, targetFile.file.name, result, regions);
         setFiles(prev => prev.map((f, idx) => 
           idx === i ? { ...f, syncStatus: syncSuccess ? 'synced' : 'failed' } : f
@@ -134,6 +134,32 @@ const App: React.FC = () => {
       }
     }
     setIsProcessing(false);
+  };
+
+  const exportAsCSV = () => {
+    if (files.filter(f => f.status === 'completed').length === 0) {
+      alert("No completed extractions to export.");
+      return;
+    }
+
+    const headers = ['File Name', ...regions.map(r => r.name)];
+    const csvRows = files
+      .filter(f => f.status === 'completed')
+      .map(f => [
+        f.file.name,
+        ...regions.map(r => `"${(f.extractedData?.[r.name] || '').replace(/"/g, '""')}"`)
+      ]);
+
+    const csvContent = [headers.join(','), ...csvRows.map(row => row.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    link.setAttribute('download', `scanflow_export_${batchId}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const syncToGoogleSheets = async () => {
@@ -167,7 +193,7 @@ const App: React.FC = () => {
           <div className="bg-indigo-600 p-2 rounded-lg"><Layers className="text-white w-6 h-6" /></div>
           <div>
             <h1 className="font-bold text-xl tracking-tight">ScanFlow <span className="text-indigo-600">Enterprise</span></h1>
-            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Active Batch: {batchId}</p>
+            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Cloud Sync: Active</p>
           </div>
         </div>
 
@@ -313,6 +339,13 @@ const App: React.FC = () => {
               </div>
               <div className="flex items-center space-x-3">
                 <button 
+                  onClick={exportAsCSV}
+                  className="flex items-center space-x-2 px-6 py-2 bg-slate-100 text-slate-700 rounded-xl font-bold text-xs hover:bg-slate-200 transition-all active:scale-95"
+                >
+                  <Download size={16} />
+                  <span>Download CSV</span>
+                </button>
+                <button 
                   onClick={syncToGoogleSheets}
                   className="flex items-center space-x-2 px-6 py-2 bg-emerald-600 text-white rounded-xl font-bold text-xs hover:bg-emerald-700 transition-all shadow-md active:scale-95"
                 >
@@ -370,7 +403,7 @@ const App: React.FC = () => {
           </div>
           <div className="flex items-center space-x-2 border-l border-slate-200 pl-6 text-[10px] font-bold text-slate-500 uppercase tracking-widest">
             <History size={12} className="text-slate-400"/>
-            <span>Batch Persistence Engine: Firestore</span>
+            <span>Batch Persistence: Firestore</span>
           </div>
         </div>
         <div className="flex items-center space-x-4 text-[10px] font-bold text-slate-400">
