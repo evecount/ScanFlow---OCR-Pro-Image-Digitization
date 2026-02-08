@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { 
   Plus, 
   Trash2, 
@@ -16,11 +16,25 @@ import {
   X,
   FileJson,
   FileCode,
-  ClipboardList
+  ClipboardList,
+  Sparkles,
+  Wand2,
+  Info,
+  AlertCircle,
+  Zap,
+  MessageSquareQuote,
+  RefreshCw,
+  Cloud,
+  CloudCheck,
+  CloudOff,
+  History,
+  Grid3X3
 } from 'lucide-react';
-import { Region, ScannedFile } from './types';
+import { Region, ScannedFile, SyncStatus } from './types';
 import DocumentCanvas from './components/DocumentCanvas';
-import { extractDataFromImage } from './services/geminiService';
+import { extractDataFromImage, detectRegionsFromImage } from './services/geminiService';
+import { saveExtractionToFirestore } from './services/firestoreService';
+import { appendToGoogleSheet } from './services/googleSheetsService';
 
 const App: React.FC = () => {
   const [files, setFiles] = useState<ScannedFile[]>([]);
@@ -28,22 +42,18 @@ const App: React.FC = () => {
   const [regions, setRegions] = useState<Region[]>([]);
   const [activeRegionId, setActiveRegionId] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isDetecting, setIsDetecting] = useState(false);
   const [view, setView] = useState<'editor' | 'results'>('editor');
-
+  const [aiHints, setAiHints] = useState('');
+  
+  const batchId = useMemo(() => `batch_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`, []);
   const currentFile = files[currentIndex];
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const fileList = e.target.files ? (Array.from(e.target.files) as File[]) : [];
-    const newFiles: ScannedFile[] = fileList.map(file => ({
-      id: Math.random().toString(36).substring(2, 11),
-      file,
-      preview: URL.createObjectURL(file),
-      status: 'pending' as const,
-    }));
-    setFiles(prev => [...prev, ...newFiles]);
-  };
-
   const removeFile = (id: string) => {
+    // Only allow deletion if not currently being processed by the batch runner
+    const fileToRemove = files.find(f => f.id === id);
+    if (fileToRemove?.status === 'processing') return;
+
     setFiles(prev => {
       const filtered = prev.filter(f => f.id !== id);
       if (currentIndex >= filtered.length && filtered.length > 0) {
@@ -53,18 +63,44 @@ const App: React.FC = () => {
     });
   };
 
-  const deleteRegion = (id: string) => {
-    setRegions(prev => prev.filter(r => r.id !== id));
-    if (activeRegionId === id) setActiveRegionId(null);
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files ? (Array.from(e.target.files) as File[]) : [];
+    if (fileList.length === 0) return;
+
+    const newFiles: ScannedFile[] = fileList.map(file => ({
+      id: Math.random().toString(36).substring(2, 11),
+      file,
+      preview: URL.createObjectURL(file),
+      status: 'pending' as const,
+      syncStatus: 'unsynced' as const,
+    }));
+
+    setFiles(prev => [...prev, ...newFiles]);
+
+    if (regions.length === 0 && newFiles.length > 0) {
+      triggerAutoDetectForFile(newFiles[0]);
+    }
   };
 
-  const updateRegionName = (id: string, name: string) => {
-    setRegions(prev => prev.map(r => r.id === id ? { ...r, name } : r));
+  const triggerAutoDetectForFile = async (scannedFile: ScannedFile) => {
+    setIsDetecting(true);
+    try {
+      const base64 = await fileToBase64(scannedFile.file);
+      const detectedRegions = await detectRegionsFromImage(base64, aiHints);
+      if (detectedRegions && detectedRegions.length > 0) {
+        setRegions(detectedRegions);
+        setActiveRegionId(detectedRegions[0].id);
+      }
+    } catch (error) {
+      console.error("Auto-detection error:", error);
+    } finally {
+      setIsDetecting(false);
+    }
   };
 
   const processAllFiles = async () => {
     if (regions.length === 0) {
-      alert("Please define at least one region to extract.");
+      alert("Please define mapping regions first.");
       return;
     }
     
@@ -72,112 +108,78 @@ const App: React.FC = () => {
     setView('results');
 
     for (let i = 0; i < files.length; i++) {
-      if (files[i].status === 'completed') continue;
+      const targetFile = files[i];
+      if (targetFile.status === 'completed') continue;
 
       setFiles(prev => prev.map((f, idx) => idx === i ? { ...f, status: 'processing' } : f));
 
       try {
-        const file = files[i].file;
-        const base64 = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result as string);
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        });
-
-        const result = await extractDataFromImage(base64, regions);
+        const base64 = await fileToBase64(targetFile.file);
+        const result = await extractDataFromImage(base64, regions, aiHints);
+        
         setFiles(prev => prev.map((f, idx) => 
-          idx === i ? { ...f, status: 'completed', extractedData: result } : f
+          idx === i ? { ...f, status: 'completed', extractedData: result, syncStatus: 'syncing' } : f
         ));
+
+        const syncSuccess = await saveExtractionToFirestore(batchId, targetFile.file.name, result, regions);
+        setFiles(prev => prev.map((f, idx) => 
+          idx === i ? { ...f, syncStatus: syncSuccess ? 'synced' : 'failed' } : f
+        ));
+
       } catch (error) {
-        console.error("Extraction error:", error);
-        setFiles(prev => prev.map((f, idx) => idx === i ? { ...f, status: 'error' } : f));
+        console.error(`Batch Error:`, error);
+        setFiles(prev => prev.map((f, idx) => 
+          idx === i ? { ...f, status: 'error', error: 'Extraction failed' } : f
+        ));
       }
     }
-
     setIsProcessing(false);
   };
 
-  const downloadFile = (content: string, fileName: string, contentType: string) => {
-    const blob = new Blob([content], { type: contentType });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = fileName;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+  const syncToGoogleSheets = async () => {
+    const spreadsheetId = prompt("Enter Google Spreadsheet ID:");
+    const token = prompt("Enter Google API Access Token:");
+    if (!spreadsheetId || !token) return;
+
+    alert("Syncing batch to Google Sheets...");
+    for (const file of files) {
+      if (file.status === 'completed' && file.extractedData) {
+        const rowData = [file.file.name, ...regions.map(r => file.extractedData?.[r.name] || '')];
+        await appendToGoogleSheet(spreadsheetId, token, rowData);
+      }
+    }
+    alert("Batch sync complete!");
   };
 
-  const exportAsCSV = () => {
-    const headers = regions.map(r => r.name);
-    const rows = files
-      .filter(f => f.extractedData)
-      .map(f => headers.map(h => `"${(f.extractedData?.[h] || '').replace(/"/g, '""')}"`).join(','));
-    const content = [headers.join(','), ...rows].join('\n');
-    downloadFile(content, 'scanflow_results.csv', 'text/csv;charset=utf-8;');
-  };
-
-  const exportAsJSON = () => {
-    const data = files
-      .filter(f => f.extractedData)
-      .map(f => ({
-        fileName: f.file.name,
-        data: f.extractedData
-      }));
-    downloadFile(JSON.stringify(data, null, 2), 'scanflow_results.json', 'application/json');
-  };
-
-  const exportAsMarkdown = () => {
-    const headers = regions.map(r => r.name);
-    let md = `# OCR Extraction Report\n\n`;
-    md += `| File Name | ${headers.join(' | ')} |\n`;
-    md += `| :--- | ${headers.map(() => ' :--- ').join('|')} |\n`;
-    
-    files.filter(f => f.extractedData).forEach(f => {
-      const row = headers.map(h => f.extractedData?.[h] || '-').join(' | ');
-      md += `| ${f.file.name} | ${row} |\n`;
+  const fileToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
     });
-    
-    downloadFile(md, 'scanflow_report.md', 'text/markdown');
   };
 
   return (
     <div className="flex flex-col h-screen bg-slate-50 overflow-hidden text-slate-900">
       <header className="flex items-center justify-between px-6 py-4 bg-white border-b border-slate-200 z-10 shadow-sm">
         <div className="flex items-center space-x-3">
-          <div className="bg-indigo-600 p-2 rounded-lg">
-            <Layers className="text-white w-6 h-6" />
-          </div>
+          <div className="bg-indigo-600 p-2 rounded-lg"><Layers className="text-white w-6 h-6" /></div>
           <div>
-            <h1 className="font-bold text-xl tracking-tight">ScanFlow <span className="text-indigo-600">Lite</span></h1>
-            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Universal OCR Export</p>
+            <h1 className="font-bold text-xl tracking-tight">ScanFlow <span className="text-indigo-600">Enterprise</span></h1>
+            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Active Batch: {batchId}</p>
           </div>
         </div>
 
         <div className="flex items-center space-x-4">
           <div className="flex bg-slate-100 p-1 rounded-xl">
-            <button 
-              onClick={() => setView('editor')}
-              className={`flex items-center space-x-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${view === 'editor' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
-            >
-              <FileText size={18} />
-              <span>Editor</span>
-            </button>
-            <button 
-              onClick={() => setView('results')}
-              className={`flex items-center space-x-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${view === 'results' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
-            >
-              <TableIcon size={18} />
-              <span>Results</span>
-            </button>
+            <button onClick={() => setView('editor')} className={`flex items-center space-x-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${view === 'editor' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600'}`}><FileText size={18} /><span>Editor</span></button>
+            <button onClick={() => setView('results')} className={`flex items-center space-x-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${view === 'results' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600'}`}><TableIcon size={18} /><span>Results Hub</span></button>
           </div>
-          
           <button 
             onClick={processAllFiles}
-            disabled={isProcessing || files.length === 0}
-            className="flex items-center space-x-2 px-6 py-2 bg-indigo-600 text-white rounded-xl font-bold text-sm hover:bg-indigo-700 transition-colors disabled:opacity-50 shadow-lg shadow-indigo-500/20"
+            disabled={isProcessing || files.length === 0 || regions.length === 0}
+            className="flex items-center space-x-2 px-6 py-2 bg-indigo-600 text-white rounded-xl font-bold text-sm hover:bg-indigo-700 transition-colors disabled:opacity-50 shadow-lg shadow-indigo-500/20 active:scale-95"
           >
             {isProcessing ? <Loader2 size={18} className="animate-spin" /> : <Play size={18} fill="currentColor" />}
             <span>{isProcessing ? 'Processing Batch...' : 'Run Automation'}</span>
@@ -191,65 +193,62 @@ const App: React.FC = () => {
             <div className="w-80 border-r border-slate-200 bg-white flex flex-col">
               <div className="p-4 border-b border-slate-100 bg-slate-50/50">
                 <div className="flex items-center justify-between mb-3">
-                  <h3 className="font-bold text-slate-700 flex items-center space-x-2">
-                    <FileText size={16} className="text-indigo-500" />
-                    <span>File Queue</span>
-                  </h3>
-                  <span className="text-xs font-bold text-slate-400 bg-slate-200 px-2 py-0.5 rounded-full">
-                    {files.length}
-                  </span>
+                  <h3 className="font-bold text-slate-700 flex items-center space-x-2"><FileText size={16} className="text-indigo-500" /><span>Queue</span></h3>
                 </div>
-                <label className="flex flex-col items-center justify-center w-full h-24 border-2 border-dashed border-slate-300 rounded-xl hover:border-indigo-400 hover:bg-indigo-50 transition-all cursor-pointer group">
-                  <Upload className="text-slate-400 group-hover:text-indigo-500 mb-2" size={20} />
-                  <span className="text-xs font-bold text-slate-500 group-hover:text-indigo-600">Drop Files Here</span>
+                <label className="flex flex-col items-center justify-center w-full h-24 border-2 border-dashed border-slate-300 rounded-xl hover:border-indigo-400 hover:bg-indigo-50 cursor-pointer group transition-all">
+                  <Upload className="text-slate-400 group-hover:text-indigo-500 mb-1" size={20} />
+                  <span className="text-[10px] font-bold text-slate-500 group-hover:text-indigo-600">Drop Scans Here</span>
                   <input type="file" multiple accept="image/*" className="hidden" onChange={handleFileUpload} />
                 </label>
               </div>
               <div className="flex-1 overflow-y-auto p-3 space-y-2">
+                {files.length === 0 && (
+                  <div className="flex flex-col items-center justify-center py-10 px-4 text-center">
+                    <div className="w-12 h-12 bg-slate-50 rounded-full flex items-center justify-center mb-3">
+                      <FileText className="text-slate-300" size={24} />
+                    </div>
+                    <p className="text-xs font-medium text-slate-400">Queue is empty. Upload documents to start mapping.</p>
+                  </div>
+                )}
                 {files.map((file, idx) => (
-                  <div 
-                    key={file.id}
-                    onClick={() => setCurrentIndex(idx)}
-                    className={`group relative p-3 rounded-xl border transition-all cursor-pointer ${
-                      currentIndex === idx 
-                        ? 'border-indigo-200 bg-indigo-50 ring-1 ring-indigo-100' 
-                        : 'border-slate-100 bg-white hover:border-slate-200'
-                    }`}
-                  >
+                  <div key={file.id} onClick={() => setCurrentIndex(idx)} className={`group relative p-3 rounded-xl border transition-all cursor-pointer ${currentIndex === idx ? 'border-indigo-200 bg-indigo-50 ring-1 ring-indigo-100' : 'border-slate-100 hover:border-slate-200 bg-white'}`}>
                     <div className="flex items-center space-x-3">
-                      <div className="w-12 h-16 bg-slate-100 rounded border overflow-hidden flex-shrink-0">
-                        <img src={file.preview} alt="Thumb" className="w-full h-full object-cover" />
-                      </div>
+                      <div className="w-10 h-14 bg-slate-100 rounded border overflow-hidden flex-shrink-0"><img src={file.preview} className="w-full h-full object-cover" /></div>
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm font-semibold text-slate-700 truncate">{file.file.name}</p>
+                        <p className="text-xs font-bold text-slate-700 truncate pr-4">{file.file.name}</p>
                         <div className="flex items-center mt-1">
-                          {file.status === 'completed' ? (
-                            <span className="text-[9px] font-bold text-emerald-600 bg-emerald-100 px-2 py-0.5 rounded">READY</span>
-                          ) : file.status === 'processing' ? (
-                            <span className="text-[9px] font-bold text-indigo-600 bg-indigo-100 px-2 py-0.5 rounded animate-pulse">OCR...</span>
+                          {file.status === 'error' ? (
+                            <span className="text-[8px] font-bold text-red-500">FAILED</span>
                           ) : (
-                            <span className="text-[9px] font-bold text-slate-400 border border-slate-200 px-2 py-0.5 rounded">IDLE</span>
+                            <span className={`text-[8px] font-bold uppercase tracking-wider ${file.status === 'completed' ? 'text-emerald-500' : 'text-slate-400'}`}>
+                              {file.status}
+                            </span>
                           )}
                         </div>
                       </div>
-                      <button 
-                        onClick={(e) => { e.stopPropagation(); removeFile(file.id); }}
-                        className="opacity-0 group-hover:opacity-100 p-1.5 text-slate-400 hover:text-red-500 transition-opacity"
-                      >
-                        <X size={16} />
-                      </button>
+                      {file.status !== 'processing' && (
+                        <button 
+                          onClick={(e) => { e.stopPropagation(); removeFile(file.id); }}
+                          className="opacity-0 group-hover:opacity-100 p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all absolute right-2 top-2"
+                        >
+                          <X size={14} />
+                        </button>
+                      )}
                     </div>
                   </div>
                 ))}
               </div>
             </div>
 
-            <div className="flex-1 bg-slate-100/50 p-8 overflow-y-auto flex flex-col items-center">
+            <div className="flex-1 bg-slate-100/50 p-8 flex flex-col items-center relative overflow-y-auto">
               {currentFile ? (
-                <div className="w-full max-w-3xl">
-                  <div className="mb-4 flex items-center justify-between">
-                    <h2 className="text-sm font-bold text-slate-500 uppercase tracking-widest">Mapping Area</h2>
-                    <p className="text-xs font-semibold text-slate-400">Targeting: {currentFile.file.name}</p>
+                <div className="w-full max-w-3xl space-y-4">
+                  <div className="flex items-center justify-between text-xs font-bold text-slate-400 uppercase tracking-widest">
+                    <div className="flex items-center space-x-4">
+                      <span>Blueprint Canvas</span>
+                      <button onClick={() => triggerAutoDetectForFile(currentFile)} className="text-indigo-600 flex items-center space-x-1 hover:text-indigo-700 transition-colors"><RefreshCw size={12}/><span>Recalibrate</span></button>
+                    </div>
+                    <span>{currentFile.file.name}</span>
                   </div>
                   <DocumentCanvas 
                     imageSrc={currentFile.preview}
@@ -260,146 +259,104 @@ const App: React.FC = () => {
                   />
                 </div>
               ) : (
-                <div className="flex-1 flex flex-col items-center justify-center text-slate-400">
-                  <div className="w-20 h-20 bg-slate-200 rounded-full flex items-center justify-center mb-6">
-                    <FileText size={32} />
-                  </div>
-                  <h2 className="text-xl font-bold text-slate-600 mb-2">No Document Selected</h2>
-                  <p className="max-w-xs text-center text-sm">Upload images to begin mapping the extraction fields.</p>
+                <div className="flex-1 flex flex-col items-center justify-center text-center">
+                  <div className="w-20 h-20 bg-indigo-50 rounded-full flex items-center justify-center mb-6"><Zap className="text-indigo-600 animate-pulse" size={32}/></div>
+                  <h2 className="text-2xl font-bold text-slate-800">Workspace Ready</h2>
+                  <p className="text-slate-500 text-sm max-w-xs mt-2">Upload document scans to start mapping your data fields for this batch.</p>
                 </div>
               )}
             </div>
 
             <div className="w-80 border-l border-slate-200 bg-white flex flex-col">
               <div className="p-4 border-b border-slate-100 bg-slate-50/50">
-                <h3 className="font-bold text-slate-700 flex items-center space-x-2">
-                  <Settings size={16} className="text-indigo-500" />
-                  <span>Mapping Rules</span>
-                </h3>
+                <h3 className="font-bold text-slate-700 flex items-center space-x-2"><MessageSquareQuote size={16} className="text-indigo-500" /><span>AI Guidance</span></h3>
               </div>
-              <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              <div className="p-4 border-b border-slate-100">
+                <textarea 
+                  value={aiHints}
+                  onChange={(e) => setAiHints(e.target.value)}
+                  placeholder="Tell Gemini what to prioritize (e.g., 'Look for handwritten signatures')..."
+                  className="w-full h-32 p-3 text-xs bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all resize-none"
+                />
+              </div>
+
+              <div className="p-4 border-b border-slate-100 bg-slate-50/50">
+                <h3 className="font-bold text-slate-700 flex items-center space-x-2"><Settings size={16} className="text-indigo-500" /><span>Mapping Rules</span></h3>
+              </div>
+              <div className="p-4 flex-1 overflow-y-auto space-y-3">
+                {regions.length === 0 && (
+                  <div className="text-center py-6 px-4">
+                    <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">No Regions Mapped</p>
+                    <p className="text-[9px] text-slate-400 mt-1">Draw areas on the canvas to define extraction fields.</p>
+                  </div>
+                )}
                 {regions.map((region) => (
-                  <div 
-                    key={region.id}
-                    className={`p-3 rounded-xl border transition-all ${
-                      activeRegionId === region.id 
-                        ? 'border-indigo-400 bg-indigo-50/50 shadow-sm' 
-                        : 'border-slate-100 bg-white hover:border-slate-200'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-[9px] font-bold text-indigo-600 bg-indigo-100 px-2 py-0.5 rounded-full uppercase tracking-widest">Field Definition</span>
-                      <button onClick={() => deleteRegion(region.id)} className="text-slate-300 hover:text-red-500"><Trash2 size={14} /></button>
-                    </div>
+                  <div key={region.id} className={`group flex items-center justify-between p-2 rounded-xl border text-[11px] font-bold transition-all ${activeRegionId === region.id ? 'border-indigo-400 bg-indigo-50' : 'border-slate-100 hover:border-slate-200 bg-white'}`}>
                     <input 
                       type="text" 
                       value={region.name}
-                      onChange={(e) => updateRegionName(region.id, e.target.value)}
-                      className="w-full text-xs font-bold bg-transparent border-b border-slate-200 focus:border-indigo-500 outline-none pb-1"
-                      placeholder="e.g. Invoice Number"
+                      onChange={(e) => setRegions(regions.map(r => r.id === region.id ? {...r, name: e.target.value} : r))}
+                      className="bg-transparent outline-none flex-1"
                     />
+                    <button onClick={() => setRegions(regions.filter(r => r.id !== region.id))} className="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-red-500 transition-colors"><X size={12}/></button>
                   </div>
                 ))}
-                {regions.length === 0 && (
-                  <div className="text-center py-10">
-                    <div className="w-12 h-12 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-3">
-                      <Plus className="text-slate-300" size={20} />
-                    </div>
-                    <p className="text-xs text-slate-400 font-medium px-6 leading-relaxed">Draw a rectangle on the document to define an extraction field.</p>
-                  </div>
-                )}
-              </div>
-              <div className="p-4 bg-indigo-50 border-t border-indigo-100">
-                <div className="flex items-center space-x-2 mb-2">
-                  <ClipboardList size={14} className="text-indigo-600" />
-                  <span className="text-[10px] font-bold text-indigo-700 uppercase">Batch Stats</span>
-                </div>
-                <div className="space-y-1 text-[10px] font-semibold text-indigo-600/70">
-                  <div className="flex justify-between"><span>Files in queue:</span> <span>{files.length}</span></div>
-                  <div className="flex justify-between"><span>Active fields:</span> <span>{regions.length}</span></div>
-                </div>
               </div>
             </div>
           </>
         ) : (
-          <div className="flex-1 flex flex-col bg-white overflow-hidden">
-            <div className="p-8">
-              <div className="flex items-center justify-between mb-8">
-                <div>
-                  <h2 className="text-2xl font-bold text-slate-800">Export Hub</h2>
-                  <p className="text-slate-500 text-sm">Your extracted data is ready. Choose your preferred format below.</p>
-                </div>
-                <div className="flex space-x-2">
-                  <button 
-                    onClick={exportAsCSV}
-                    className="flex items-center space-x-2 px-4 py-2 bg-slate-900 text-white rounded-xl font-bold text-xs hover:bg-slate-800 transition-all"
-                  >
-                    <Download size={14} />
-                    <span>CSV</span>
-                  </button>
-                  <button 
-                    onClick={exportAsJSON}
-                    className="flex items-center space-x-2 px-4 py-2 bg-indigo-600 text-white rounded-xl font-bold text-xs hover:bg-indigo-700 transition-all"
-                  >
-                    <FileJson size={14} />
-                    <span>JSON</span>
-                  </button>
-                  <button 
-                    onClick={exportAsMarkdown}
-                    className="flex items-center space-x-2 px-4 py-2 bg-emerald-600 text-white rounded-xl font-bold text-xs hover:bg-emerald-700 transition-all"
-                  >
-                    <FileCode size={14} />
-                    <span>Markdown</span>
-                  </button>
-                </div>
+          <div className="flex-1 flex flex-col bg-white overflow-hidden p-8">
+            <div className="flex items-center justify-between mb-8">
+              <div>
+                <h2 className="text-2xl font-bold text-slate-800">Results Hub</h2>
+                <p className="text-slate-500 text-sm">Review batch extractions and sync to external systems.</p>
               </div>
-
-              <div className="overflow-x-auto rounded-2xl border border-slate-200">
-                <table className="w-full text-left border-collapse">
-                  <thead>
-                    <tr className="bg-slate-50 border-b border-slate-200">
-                      <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Source Document</th>
+              <div className="flex items-center space-x-3">
+                <button 
+                  onClick={syncToGoogleSheets}
+                  className="flex items-center space-x-2 px-6 py-2 bg-emerald-600 text-white rounded-xl font-bold text-xs hover:bg-emerald-700 transition-all shadow-md active:scale-95"
+                >
+                  <Grid3X3 size={16} />
+                  <span>Sync to Sheets</span>
+                </button>
+                <div className="h-6 w-px bg-slate-200 mx-2"></div>
+                <button onClick={() => setView('editor')} className="text-xs font-bold text-indigo-600 hover:underline">Back to Mapping</button>
+              </div>
+            </div>
+            
+            <div className="flex-1 overflow-auto rounded-2xl border border-slate-200 shadow-sm">
+              <table className="w-full text-left">
+                <thead>
+                  <tr className="bg-slate-50 border-b border-slate-200">
+                    <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase">Document</th>
+                    <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase text-center">Sync Status</th>
+                    {regions.map(r => <th key={r.id} className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase">{r.name}</th>)}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {files.map(file => (
+                    <tr key={file.id} className={`${file.status === 'error' ? 'bg-red-50/50' : 'hover:bg-slate-50/50 transition-colors'}`}>
+                      <td className="px-6 py-4">
+                        <div className="flex flex-col">
+                          <span className="text-xs font-bold text-slate-700">{file.file.name}</span>
+                          {file.status === 'error' && <span className="text-[9px] text-red-500 font-bold uppercase mt-0.5">Extraction Failed</span>}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 text-center">
+                        {file.syncStatus === 'synced' ? <CloudCheck className="mx-auto text-emerald-500" size={16}/> : 
+                         file.syncStatus === 'syncing' ? <Loader2 className="mx-auto text-indigo-400 animate-spin" size={16}/> : 
+                         file.syncStatus === 'failed' ? <CloudOff className="mx-auto text-red-400" size={16}/> :
+                         <Cloud className="mx-auto text-slate-200" size={16}/>}
+                      </td>
                       {regions.map(r => (
-                        <th key={r.id} className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">{r.name}</th>
+                        <td key={r.id} className="px-6 py-4 text-xs text-slate-600 font-medium">
+                          {file.status === 'completed' ? (file.extractedData?.[r.name] || '-') : <span className="text-slate-300 italic uppercase text-[10px]">{file.status}</span>}
+                        </td>
                       ))}
                     </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {files.filter(f => f.status === 'completed').map(file => (
-                      <tr key={file.id} className="hover:bg-slate-50/50 transition-colors">
-                        <td className="px-6 py-4">
-                          <div className="flex items-center space-x-3">
-                            <div className="w-8 h-8 rounded bg-indigo-50 flex items-center justify-center text-indigo-600">
-                              <CheckCircle2 size={16} />
-                            </div>
-                            <span className="text-xs font-bold text-slate-700 truncate max-w-[150px]">{file.file.name}</span>
-                          </div>
-                        </td>
-                        {regions.map(r => (
-                          <td key={r.id} className="px-6 py-4 text-xs text-slate-600 font-medium">
-                            {file.extractedData?.[r.name] || '-'}
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              
-              {files.filter(f => f.status === 'completed').length === 0 && !isProcessing && (
-                <div className="text-center py-20 bg-slate-50 rounded-3xl mt-4 border border-dashed border-slate-200">
-                  <TableIcon className="mx-auto mb-4 text-slate-300" size={48} />
-                  <h3 className="text-lg font-bold text-slate-600 mb-2">No Processed Data</h3>
-                  <p className="text-slate-500 text-sm mb-6">Return to the editor and run automation to see results here.</p>
-                  <button 
-                    onClick={() => setView('editor')}
-                    className="inline-flex items-center space-x-2 text-indigo-600 font-bold hover:text-indigo-700 transition-colors"
-                  >
-                    <span>Back to Workspace</span>
-                    <ChevronRight size={18} />
-                  </button>
-                </div>
-              )}
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
         )}
@@ -407,16 +364,17 @@ const App: React.FC = () => {
 
       <footer className="px-6 py-3 bg-white border-t border-slate-200 flex items-center justify-between">
         <div className="flex items-center space-x-6">
-          <div className="flex items-center space-x-2">
-            <span className="block w-2 h-2 rounded-full bg-indigo-500"></span>
-            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Model: Gemini 3 Flash</span>
+          <div className="flex items-center space-x-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+            <div className={`w-2 h-2 rounded-full ${isProcessing ? 'bg-indigo-500 animate-pulse' : 'bg-emerald-500'}`}></div>
+            <span>System: Active</span>
           </div>
-          <div className="flex items-center space-x-2 border-l border-slate-200 pl-6">
-            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Privacy: Local-Only Export</span>
+          <div className="flex items-center space-x-2 border-l border-slate-200 pl-6 text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+            <History size={12} className="text-slate-400"/>
+            <span>Batch Persistence Engine: Firestore</span>
           </div>
         </div>
-        <div className="text-[10px] font-bold text-slate-400">
-          ScanFlow v2.5 &bull; Build 2024.12
+        <div className="flex items-center space-x-4 text-[10px] font-bold text-slate-400">
+          <span>Synced to Cloud: {files.filter(f => f.syncStatus === 'synced').length} / {files.length}</span>
         </div>
       </footer>
     </div>
