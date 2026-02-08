@@ -1,6 +1,6 @@
 {
-  "name": "ScanFlow OCR Pro",
-  "description": "An enterprise-grade OCR automation tool that allows users to map specific areas of scanned documents to data fields and extract information directly into structured formats, ready for Google Sheets.",
+  "name": "ScanFlow OCR Lite",
+  "description": "High-speed OCR mapping tool that extracts structured data from documents into CSV, JSON, and Markdown formats using Gemini 3.",
   "requestFramePermissions": [
     "camera"
   ]

@@ -18,7 +18,6 @@ export interface ScannedFile {
   file: File;
   preview: string;
   status: 'pending' | 'processing' | 'completed' | 'error';
-  sheetSyncStatus: 'pending' | 'syncing' | 'synced' | 'failed';
   extractedData?: Record<string, string>;
 }
 
