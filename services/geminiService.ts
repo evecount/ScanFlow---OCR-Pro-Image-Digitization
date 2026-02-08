@@ -5,11 +5,12 @@ import { Region, OCRResult } from "../types";
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 /**
- * Extracts specific text from predefined regions
+ * Extracts specific text from predefined regions, incorporating custom user hints for better accuracy.
  */
 export async function extractDataFromImage(
   base64Image: string,
-  regions: Region[]
+  regions: Region[],
+  customInstructions?: string
 ): Promise<OCRResult> {
   const model = 'gemini-3-flash-preview';
   const regionsDescription = regions.map(r => 
@@ -19,6 +20,8 @@ export async function extractDataFromImage(
   const prompt = `
     Extract text from the following regions of this document:
     ${regionsDescription}
+    
+    ${customInstructions ? `SPECIAL USER INSTRUCTIONS: ${customInstructions}` : ''}
     
     Return a JSON object where keys are the Field Names and values are the extracted text.
   `;
@@ -58,15 +61,24 @@ export async function extractDataFromImage(
 }
 
 /**
- * Automatically detects potential data fields in an image using Gemini's layout intelligence.
+ * Automatically detects potential data fields in an image using Gemini's layout intelligence,
+ * prioritized by user-provided NLP instructions.
  */
-export async function detectRegionsFromImage(base64Image: string): Promise<Region[]> {
+export async function detectRegionsFromImage(
+  base64Image: string, 
+  userHints?: string
+): Promise<Region[]> {
   const model = 'gemini-3-flash-preview';
   const prompt = `
-    Analyze this document and identify key data fields for structured extraction (e.g. Invoice Number, Date, Total, Vendor Name, Due Date, Tax).
+    Analyze this document and identify key data fields for structured extraction.
+    
+    ${userHints ? `USER PRIORITIES & HINTS: "${userHints}"` : 'Standard fields to look for: Invoice Number, Date, Total, Vendor Name, Due Date, Tax.'}
+    
     For each field identified, provide:
     1. A short, unique name for the field.
     2. A bounding box defined as percentages (0-100) of the image's width and height.
+    
+    IMPORTANT: If user hints specify certain information, prioritize finding those specific areas accurately.
     
     Return the result as a list of fields with their name and coordinates (x, y, width, height).
   `;
