@@ -13,12 +13,16 @@ export interface Region {
   height: number; // percentage 0-100
 }
 
+export type SyncStatus = 'unsynced' | 'syncing' | 'synced' | 'failed';
+
 export interface ScannedFile {
   id: string;
   file: File;
   preview: string;
   status: 'pending' | 'processing' | 'completed' | 'error';
+  syncStatus: SyncStatus;
   extractedData?: Record<string, string>;
+  error?: string;
 }
 
 export interface OCRResult {
