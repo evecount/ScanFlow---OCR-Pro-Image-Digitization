@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { 
   Plus, 
   Trash2, 
@@ -28,13 +28,18 @@ import {
   CloudCheck,
   CloudOff,
   History,
-  Grid3X3
+  Grid3X3,
+  File as FileIcon
 } from 'lucide-react';
 import { Region, ScannedFile, SyncStatus } from './types';
 import DocumentCanvas from './components/DocumentCanvas';
 import { extractDataFromImage, detectRegionsFromImage } from './services/geminiService';
 import { saveExtractionToFirestore } from './services/firestoreService';
 import { appendToGoogleSheet } from './services/googleSheetsService';
+import * as pdfjsLib from 'pdfjs-dist';
+
+// Set up PDF.js worker
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://esm.sh/pdfjs-dist@4.0.379/build/pdf.worker.mjs';
 
 const App: React.FC = () => {
   const [files, setFiles] = useState<ScannedFile[]>([]);
@@ -62,30 +67,63 @@ const App: React.FC = () => {
     });
   };
 
+  const renderPdfToImage = async (file: File): Promise<string> => {
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    const page = await pdf.getPage(1);
+    const viewport = page.getViewport({ scale: 2.0 });
+    
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error("Canvas context failed");
+    
+    canvas.height = viewport.height;
+    canvas.width = viewport.width;
+    
+    await page.render({ canvasContext: context, viewport }).promise;
+    return canvas.toDataURL('image/jpeg', 0.85);
+  };
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files ? (Array.from(e.target.files) as File[]) : [];
     if (fileList.length === 0) return;
 
-    const newFiles: ScannedFile[] = fileList.map(file => ({
-      id: Math.random().toString(36).substring(2, 11),
-      file,
-      preview: URL.createObjectURL(file),
-      status: 'pending' as const,
-      syncStatus: 'unsynced' as const,
-    }));
+    const processedFiles: ScannedFile[] = [];
 
-    setFiles(prev => [...prev, ...newFiles]);
+    for (const file of fileList) {
+      let preview = '';
+      if (file.type === 'application/pdf') {
+        try {
+          preview = await renderPdfToImage(file);
+        } catch (err) {
+          console.error("PDF Render Error:", err);
+          preview = ''; // Fallback
+        }
+      } else {
+        preview = await fileToBase64(file);
+      }
 
-    if (regions.length === 0 && newFiles.length > 0) {
-      triggerAutoDetectForFile(newFiles[0]);
+      processedFiles.push({
+        id: Math.random().toString(36).substring(2, 11),
+        file,
+        preview,
+        status: 'pending' as const,
+        syncStatus: 'unsynced' as const,
+      });
+    }
+
+    setFiles(prev => [...prev, ...processedFiles]);
+
+    if (regions.length === 0 && processedFiles.length > 0) {
+      triggerAutoDetectForFile(processedFiles[0]);
     }
   };
 
   const triggerAutoDetectForFile = async (scannedFile: ScannedFile) => {
+    if (!scannedFile.preview) return;
     setIsDetecting(true);
     try {
-      const base64 = await fileToBase64(scannedFile.file);
-      const detectedRegions = await detectRegionsFromImage(base64, aiHints);
+      const detectedRegions = await detectRegionsFromImage(scannedFile.preview, aiHints);
       if (detectedRegions && detectedRegions.length > 0) {
         setRegions(detectedRegions);
         setActiveRegionId(detectedRegions[0].id);
@@ -113,14 +151,12 @@ const App: React.FC = () => {
       setFiles(prev => prev.map((f, idx) => idx === i ? { ...f, status: 'processing' } : f));
 
       try {
-        const base64 = await fileToBase64(targetFile.file);
-        const result = await extractDataFromImage(base64, regions, aiHints);
+        const result = await extractDataFromImage(targetFile.preview, regions, aiHints);
         
         setFiles(prev => prev.map((f, idx) => 
           idx === i ? { ...f, status: 'completed', extractedData: result, syncStatus: 'syncing' } : f
         ));
 
-        // Persistence in Firestore
         const syncSuccess = await saveExtractionToFirestore(batchId, targetFile.file.name, result, regions);
         setFiles(prev => prev.map((f, idx) => 
           idx === i ? { ...f, syncStatus: syncSuccess ? 'synced' : 'failed' } : f
@@ -193,7 +229,7 @@ const App: React.FC = () => {
           <div className="bg-indigo-600 p-2 rounded-lg"><Layers className="text-white w-6 h-6" /></div>
           <div>
             <h1 className="font-bold text-xl tracking-tight">ScanFlow <span className="text-indigo-600">Enterprise</span></h1>
-            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Cloud Sync: Active</p>
+            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Supports PDF & Image</p>
           </div>
         </div>
 
@@ -223,23 +259,29 @@ const App: React.FC = () => {
                 </div>
                 <label className="flex flex-col items-center justify-center w-full h-24 border-2 border-dashed border-slate-300 rounded-xl hover:border-indigo-400 hover:bg-indigo-50 cursor-pointer group transition-all">
                   <Upload className="text-slate-400 group-hover:text-indigo-500 mb-1" size={20} />
-                  <span className="text-[10px] font-bold text-slate-500 group-hover:text-indigo-600">Drop Scans Here</span>
-                  <input type="file" multiple accept="image/*" className="hidden" onChange={handleFileUpload} />
+                  <span className="text-[10px] font-bold text-slate-500 group-hover:text-indigo-600">Drop PDF or Images</span>
+                  <input type="file" multiple accept="image/*,application/pdf" className="hidden" onChange={handleFileUpload} />
                 </label>
               </div>
               <div className="flex-1 overflow-y-auto p-3 space-y-2">
                 {files.length === 0 && (
                   <div className="flex flex-col items-center justify-center py-10 px-4 text-center">
                     <div className="w-12 h-12 bg-slate-50 rounded-full flex items-center justify-center mb-3">
-                      <FileText className="text-slate-300" size={24} />
+                      <FileIcon className="text-slate-300" size={24} />
                     </div>
-                    <p className="text-xs font-medium text-slate-400">Queue is empty. Upload documents to start mapping.</p>
+                    <p className="text-xs font-medium text-slate-400">Queue is empty. Upload PDFs or scans to start.</p>
                   </div>
                 )}
                 {files.map((file, idx) => (
                   <div key={file.id} onClick={() => setCurrentIndex(idx)} className={`group relative p-3 rounded-xl border transition-all cursor-pointer ${currentIndex === idx ? 'border-indigo-200 bg-indigo-50 ring-1 ring-indigo-100' : 'border-slate-100 hover:border-slate-200 bg-white'}`}>
                     <div className="flex items-center space-x-3">
-                      <div className="w-10 h-14 bg-slate-100 rounded border overflow-hidden flex-shrink-0"><img src={file.preview} className="w-full h-full object-cover" /></div>
+                      <div className="w-10 h-14 bg-slate-100 rounded border overflow-hidden flex-shrink-0">
+                        {file.preview ? (
+                          <img src={file.preview} className="w-full h-full object-cover" />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center bg-slate-50"><FileIcon size={16} className="text-slate-300"/></div>
+                        )}
+                      </div>
                       <div className="flex-1 min-w-0">
                         <p className="text-xs font-bold text-slate-700 truncate pr-4">{file.file.name}</p>
                         <div className="flex items-center mt-1">
@@ -288,7 +330,7 @@ const App: React.FC = () => {
                 <div className="flex-1 flex flex-col items-center justify-center text-center">
                   <div className="w-20 h-20 bg-indigo-50 rounded-full flex items-center justify-center mb-6"><Zap className="text-indigo-600 animate-pulse" size={32}/></div>
                   <h2 className="text-2xl font-bold text-slate-800">Workspace Ready</h2>
-                  <p className="text-slate-500 text-sm max-w-xs mt-2">Upload document scans to start mapping your data fields for this batch.</p>
+                  <p className="text-slate-500 text-sm max-w-xs mt-2">Upload document scans or PDFs to start mapping your data fields for this batch.</p>
                 </div>
               )}
             </div>
