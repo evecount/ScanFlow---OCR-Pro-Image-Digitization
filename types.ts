@@ -26,6 +26,7 @@ export type SyncStatus = 'unsynced' | 'syncing' | 'synced' | 'failed';
 export interface ScannedFile {
   id: string;
   file: File;
+  displayName?: string;
   preview: string;
   status: 'pending' | 'processing' | 'completed' | 'error';
   syncStatus: SyncStatus;
